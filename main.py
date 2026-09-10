@@ -1,4 +1,4 @@
-"""Main game engine"""
+"""Complete game implementation with all systems integrated"""
 import pygame
 import sys
 import random
@@ -11,11 +11,24 @@ from systems.combat import CombatSystem
 from systems.building import BuildingSystem
 from systems.mining import MiningSystem
 from systems.camera import Camera
+from systems.loot import LootSystem
+from systems.npc import NPCManager, NPC
+from systems.progression import QuestSystem, ProgressionSystem
+from systems.boss import BossArena, BossAI, BossReward
+from systems.effects import EffectSystem
+from systems.world_systems import DayNightCycle, ResourceSpawner, DifficultyScaler
+from systems.input import InputHandler
+from systems.debug import DebugDisplay
+from systems.save_system import SaveManager
+from systems.skills import SkillTree
+from systems.enchantment import EnchantmentSystem
+from systems.activities import Cooking, Alchemy
 from ui.hud import HUD, InventoryUI, CraftingUI, BuildingUI, PauseMenu
+from ui.enhanced_ui import QuestLogUI
 from utils.vector import Vector2
 
 class Game:
-    """Main game class"""
+    """Complete game implementation"""
     
     def __init__(self):
         pygame.init()
@@ -28,35 +41,58 @@ class Game:
         # Game systems
         self.world = World(WORLD_SEED)
         self.player = Player(0, 0)
+        self.player.mana = 100
+        self.player.max_mana = 100
+        
         self.crafting_system = CraftingSystem(CRAFTING_RECIPES)
         self.combat_system = CombatSystem()
         self.building_system = BuildingSystem()
         self.mining_system = MiningSystem()
+        self.loot_system = LootSystem()
         self.camera = Camera(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.npc_manager = NPCManager()
+        self.quest_system = QuestSystem()
+        self.progression_system = ProgressionSystem()
+        self.effect_system = EffectSystem()
+        self.day_night_cycle = DayNightCycle()
+        self.resource_spawner = ResourceSpawner(self.mining_system)
+        self.difficulty_scaler = DifficultyScaler()
+        self.skill_tree = SkillTree()
+        self.enchantment_system = EnchantmentSystem()
+        self.cooking = Cooking()
+        self.alchemy = Alchemy()
+        self.input_handler = InputHandler()
+        self.debug_display = DebugDisplay()
+        self.save_manager = SaveManager()
         
         # UI
         self.hud = HUD(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.inventory_ui = InventoryUI(50, 200, 300, 400)
         self.crafting_ui = CraftingUI(WINDOW_WIDTH - 350, 200, 300, 400)
         self.building_ui = BuildingUI(WINDOW_WIDTH - 350, 50, 300, 150)
+        self.quest_log_ui = QuestLogUI(50, 50, 300, 150)
         self.pause_menu = PauseMenu(WINDOW_WIDTH, WINDOW_HEIGHT)
         
         # Toggle states
         self.show_inventory = False
         self.show_crafting = False
         self.show_building = False
+        self.show_quest_log = False
         
-        # Enemies and bosses
+        # Entities
         self.enemies = []
         self.bosses = []
+        self.boss_arenas = []
+        
+        # Initialize game
         self.spawn_enemies()
         self.spawn_bosses()
-        
-        # Generate initial resources
         self.generate_resources()
+        self.setup_npcs()
+        self.setup_quests()
     
     def generate_resources(self):
-        """Generate resource nodes in the world"""
+        """Generate resource nodes"""
         for _ in range(200):
             x = random.randint(-500, 500)
             y = random.randint(-500, 500)
@@ -64,7 +100,7 @@ class Game:
             self.mining_system.add_resource(x, y, resource_type)
     
     def spawn_enemies(self):
-        """Spawn initial enemies"""
+        """Spawn enemies"""
         for _ in range(10):
             x = random.randint(-300, 300)
             y = random.randint(-300, 300)
@@ -72,13 +108,33 @@ class Game:
             self.enemies.append(Enemy(x, y, enemy_type))
     
     def spawn_bosses(self):
-        """Spawn bosses"""
-        boss_type = random.choice(list(BOSSES.keys()))
-        boss = Boss(500, 500, boss_type)
-        self.bosses.append(boss)
+        """Spawn bosses with arenas"""
+        boss_positions = [(500, 500), (-500, 500), (500, -500), (-500, -500)]
+        for pos in boss_positions:
+            boss_type = random.choice(list(BOSSES.keys()))
+            boss = Boss(pos[0], pos[1], boss_type)
+            self.bosses.append(boss)
+            arena = BossArena(pos[0], pos[1], 300)
+            self.boss_arenas.append(arena)
+    
+    def setup_npcs(self):
+        """Setup NPCs in world"""
+        npc_data = [
+            ('merchant', 'Merchant', 100, 100, ['Hello traveler!', 'Welcome to my shop!', 'Anything else?']),
+            ('guard', 'Guard', -100, 100, ['Stay safe!', 'Watch out for monsters!', 'Good luck!']),
+        ]
+        
+        for npc_id, name, x, y, dialogue in npc_data:
+            npc = NPC(npc_id, name, x, y, dialogue)
+            self.npc_manager.add_npc(npc_id, npc)
+    
+    def setup_quests(self):
+        """Setup initial quests"""
+        self.quest_system.add_quest('gather_wood')
+        self.quest_system.add_quest('gather_stone')
     
     def handle_events(self):
-        """Handle user input and events"""
+        """Handle events"""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -94,12 +150,14 @@ class Game:
                         self.show_crafting = not self.show_crafting
                     elif event.key == pygame.K_b:
                         self.show_building = not self.show_building
-                    elif event.key == pygame.K_SPACE:
-                        self.player.attack(self.enemies + self.bosses)
+                    elif event.key == pygame.K_q:
+                        self.show_quest_log = not self.show_quest_log
+                    elif event.key == pygame.K_F3:
+                        self.debug_display.toggle()
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if not self.paused and event.button == 1:  # Left click
-                    # Try to place building
+                if not self.paused and event.button == 1:
+                    # Left click to place building
                     mouse_x, mouse_y = pygame.mouse.get_pos()
                     offset = self.camera.get_offset()
                     world_x = mouse_x + offset.x
@@ -107,8 +165,8 @@ class Game:
                     
                     if self.building_ui.selected_building:
                         self.building_system.place_building(
-                            int(world_x), int(world_y), 
-                            self.building_ui.selected_building, 
+                            int(world_x), int(world_y),
+                            self.building_ui.selected_building,
                             self.player.inventory
                         )
     
@@ -117,19 +175,14 @@ class Game:
         if self.paused:
             return
         
-        # Handle input
-        keys = {
-            'w': pygame.key.get_pressed()[pygame.K_w],
-            'a': pygame.key.get_pressed()[pygame.K_a],
-            's': pygame.key.get_pressed()[pygame.K_s],
-            'd': pygame.key.get_pressed()[pygame.K_d],
-        }
-        self.player.handle_input(keys)
+        # Input
+        self.input_handler.update()
+        movement = self.input_handler.get_movement_vector()
+        from utils.vector import Vector2
+        self.player.vel = Vector2(movement[0], movement[1]) * PLAYER_SPEED
         
-        # Update player
+        # Update systems
         self.player.update(dt, self.world, self.camera)
-        
-        # Update camera
         self.camera.update(dt)
         
         # Update enemies
@@ -137,82 +190,105 @@ class Game:
             enemy.update(dt, self.world, self.player)
         
         # Update bosses
-        for boss in self.bosses:
+        for i, boss in enumerate(self.bosses):
+            arena = self.boss_arenas[i]
+            arena.enter_arena(self.player, boss)
             boss.update(dt, self.world, self.player)
         
-        # Remove dead enemies and bosses
+        # Remove dead
         self.enemies = [e for e in self.enemies if e.alive]
         self.bosses = [b for b in self.bosses if b.alive]
         
         # Mining
-        if pygame.key.get_pressed()[pygame.K_m]:
+        if self.input_handler.is_key_pressed('mining'):
             harvested = self.mining_system.mine_nearby(self.player, 5)
             for resource_type, amount in harvested.items():
                 self.player.inventory.add_item(resource_type, amount)
+                self.effect_system.spawn_damage_effect(self.player.pos.x, self.player.pos.y)
         
-        # Update buildings
+        # Combat
+        if self.input_handler.is_key_pressed('attack'):
+            self.player.attack(self.enemies + self.bosses)
+        
+        # Pick up loot
+        self.loot_system.pickup_nearby(self.player)
+        
+        # Update systems
         self.building_system.update(dt)
+        self.loot_system.update(dt)
+        self.effect_system.update(dt)
+        self.day_night_cycle.update(dt)
+        self.resource_spawner.update(dt, self.player)
+        self.difficulty_scaler.update(self.player.level)
+        self.debug_display.update(dt)
         
-        # Spawn new enemies occasionally
+        # Spawn new enemies
         if random.random() < 0.001:
-            x = random.randint(-300, 300)
-            y = random.randint(-300, 300)
+            x = random.randint(-300, 300) + self.player.pos.x
+            y = random.randint(-300, 300) + self.player.pos.y
             enemy_type = random.choice(list(ENEMY_TYPES.keys()))
             self.enemies.append(Enemy(x, y, enemy_type))
     
     def draw(self):
         """Render game"""
         self.screen.fill((40, 40, 40))
-        
         offset = self.camera.get_offset()
         
         # Draw world
         self.draw_world(offset)
-        
-        # Draw buildings
         self.building_system.draw(self.screen, offset)
-        
-        # Draw resources
         self.mining_system.draw(self.screen, offset)
+        self.loot_system.draw(self.screen, offset)
         
-        # Draw enemies
+        # Draw entities
         for enemy in self.enemies:
             enemy.draw(self.screen, offset)
-        
-        # Draw bosses
         for boss in self.bosses:
             boss.draw(self.screen, offset)
+        
+        # Draw bosses arenas
+        for arena in self.boss_arenas:
+            arena.draw(self.screen, offset)
+        
+        # Draw NPCs
+        self.npc_manager.draw(self.screen, offset)
         
         # Draw player
         self.player.draw(self.screen, offset)
         
-        # Draw HUD
+        # Draw effects
+        self.effect_system.draw(self.screen, offset)
+        
+        # Draw UI
         self.hud.draw(self.screen, self.player)
         
-        # Draw UI panels
         self.inventory_ui.visible = self.show_inventory
         self.crafting_ui.visible = self.show_crafting
         self.building_ui.visible = self.show_building
+        self.quest_log_ui.visible = self.show_quest_log
         
         if self.show_inventory:
             self.inventory_ui.draw(self.screen, self.player)
-        
         if self.show_crafting:
             available = self.crafting_system.get_available_recipes(self.player.inventory)
             self.crafting_ui.draw(self.screen, available)
-        
         if self.show_building:
             self.building_ui.draw(self.screen)
+        if self.show_quest_log:
+            self.quest_log_ui.draw(self.screen, self.quest_system)
         
         if self.paused:
             self.pause_menu.draw(self.screen)
+        
+        # Draw debug info
+        self.debug_display.draw(self.screen, self)
         
         pygame.display.flip()
     
     def draw_world(self, offset):
         """Draw world tiles"""
         chunks = self.world.get_chunks_in_view(
-            offset.x, offset.y, 
+            offset.x, offset.y,
             WINDOW_WIDTH, WINDOW_HEIGHT
         )
         
@@ -224,11 +300,10 @@ class Game:
                 screen_x = world_x * TILE_SIZE - offset.x
                 screen_y = world_y * TILE_SIZE - offset.y
                 
-                # Draw tile
                 color = BIOMES[tile['biome']]['color']
-                pygame.draw.rect(self.screen, color, 
+                pygame.draw.rect(self.screen, color,
                                (screen_x, screen_y, TILE_SIZE, TILE_SIZE))
-                pygame.draw.rect(self.screen, (100, 100, 100), 
+                pygame.draw.rect(self.screen, (100, 100, 100),
                                (screen_x, screen_y, TILE_SIZE, TILE_SIZE), 1)
     
     def run(self):
